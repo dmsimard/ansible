@@ -30,6 +30,9 @@ options:
    name:
      description:
         - Name that has to be given to the port.
+   description:
+     description:
+        - Description to be given to the port.
    fixed_ips:
      description:
         - Desired IP and/or subnet for this port.  Subnet is referenced by
@@ -101,6 +104,7 @@ EXAMPLES = '''
       password: admin
       project_name: admin
     name: port1
+    description: 'fixed ip'
     network: foo
     fixed_ips:
       - ip_address: 10.1.0.21
@@ -149,6 +153,10 @@ id:
     type: string
 name:
     description: Name given to the port.
+    returned: success
+    type: string
+description:
+    description: Description given to the port.
     returned: success
     type: string
 network_id:
@@ -251,6 +259,7 @@ def _system_state_change(module, port, cloud):
 def _compose_port_args(module, cloud):
     port_kwargs = {}
     optional_parameters = ['name',
+                           'description',
                            'fixed_ips',
                            'admin_state_up',
                            'mac_address',
@@ -281,6 +290,7 @@ def main():
     argument_spec = openstack_full_argument_spec(
         network=dict(required=False),
         name=dict(required=False),
+        description=dict(required=False),
         fixed_ips=dict(type='list', default=None),
         admin_state_up=dict(type='bool', default=None),
         mac_address=dict(default=None),
