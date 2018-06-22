@@ -11,7 +11,7 @@ DOCUMENTATION = """
     description:
       - Retrieves the value of an Ansible variable.
     options:
-      _term:
+      _terms:
         description: The variable names to look up.
         required: True
       default:
@@ -40,7 +40,7 @@ EXAMPLES = """
     variablename: hello
     myvar: notename
 
-- name: find several related variables:
+- name: find several related variables
   debug: msg="{{ lookup('vars', 'ansible_play_hosts', 'ansible_play_batch', 'ansible_play_hosts_all') }}"
 
 - name: alternate way to find some 'prefixed vars' in loop
@@ -54,7 +54,7 @@ EXAMPLES = """
 RETURN = """
 _value:
   description:
-    - valueof the variables requested.
+    - value of the variables requested.
 """
 
 from ansible.errors import AnsibleError, AnsibleUndefinedVariable
