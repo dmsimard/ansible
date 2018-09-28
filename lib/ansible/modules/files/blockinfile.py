@@ -160,7 +160,7 @@ from ansible.module_utils._text import to_bytes
 
 def write_changes(module, contents, path):
 
-    tmpfd, tmpfile = tempfile.mkstemp()
+    tmpfd, tmpfile = tempfile.mkstemp(dir=module.tmpdir)
     f = os.fdopen(tmpfd, 'wb')
     f.write(contents)
     f.close()
@@ -309,7 +309,7 @@ def main():
         if original is None or original.endswith(b('\n')):
             result += b('\n')
     else:
-        result = ''
+        result = b''
 
     if module._diff:
         diff['after'] = result

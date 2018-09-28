@@ -303,22 +303,22 @@ class ZipArchive(object):
         run_gid = os.getgid()
         try:
             run_owner = pwd.getpwuid(run_uid).pw_name
-        except:
+        except (TypeError, KeyError):
             run_owner = run_uid
         try:
             run_group = grp.getgrgid(run_gid).gr_name
-        except:
+        except (KeyError, ValueError, OverflowError):
             run_group = run_gid
 
         # Get future user ownership
         fut_owner = fut_uid = None
         if self.file_args['owner']:
             try:
-                tpw = pwd.getpwname(self.file_args['owner'])
-            except:
+                tpw = pwd.getpwnam(self.file_args['owner'])
+            except KeyError:
                 try:
                     tpw = pwd.getpwuid(self.file_args['owner'])
-                except:
+                except (TypeError, KeyError):
                     tpw = pwd.getpwuid(run_uid)
             fut_owner = tpw.pw_name
             fut_uid = tpw.pw_uid
@@ -334,10 +334,10 @@ class ZipArchive(object):
         if self.file_args['group']:
             try:
                 tgr = grp.getgrnam(self.file_args['group'])
-            except:
+            except (ValueError, KeyError):
                 try:
                     tgr = grp.getgrgid(self.file_args['group'])
-                except:
+                except (KeyError, ValueError, OverflowError):
                     tgr = grp.getgrgid(run_gid)
             fut_group = tgr.gr_name
             fut_gid = tgr.gr_gid
@@ -528,7 +528,7 @@ class ZipArchive(object):
             owner = uid = None
             try:
                 owner = pwd.getpwuid(st.st_uid).pw_name
-            except:
+            except (TypeError, KeyError):
                 uid = st.st_uid
 
             # If we are not root and requested owner is not our user, fail
@@ -548,7 +548,7 @@ class ZipArchive(object):
             group = gid = None
             try:
                 group = grp.getgrgid(st.st_gid).gr_name
-            except:
+            except (KeyError, ValueError, OverflowError):
                 gid = st.st_gid
 
             if run_uid != 0 and fut_gid not in groups:
@@ -821,8 +821,7 @@ def main():
             module.fail_json(msg="Source '%s' failed to transfer" % src)
         # If remote_src=true, and src= contains ://, try and download the file to a temp directory.
         elif '://' in src:
-            tempdir = os.path.dirname(os.path.realpath(__file__))
-            package = os.path.join(tempdir, str(src.rsplit('/', 1)[1]))
+            new_src = os.path.join(module.tmpdir, to_native(src.rsplit('/', 1)[1], errors='surrogate_or_strict'))
             try:
                 rsp, info = fetch_url(module, src)
                 # If download fails, raise a proper exception
@@ -830,7 +829,7 @@ def main():
                     raise Exception(info['msg'])
 
                 # open in binary mode for python3
-                f = open(package, 'wb')
+                f = open(new_src, 'wb')
                 # Read 1kb at a time to save on ram
                 while True:
                     data = rsp.read(BUFSIZE)
@@ -841,7 +840,7 @@ def main():
 
                     f.write(data)
                 f.close()
-                src = package
+                src = new_src
             except Exception as e:
                 module.fail_json(msg="Failure downloading %s, %s" % (src, to_native(e)))
         else:

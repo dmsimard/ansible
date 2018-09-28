@@ -1,6 +1,6 @@
 #!powershell
 
-# Copyright (c) 2018 Ansible Project
+# Copyright: (c) 2018, Ansible Project
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
 #Requires -Module Ansible.ModuleUtils.Legacy
@@ -192,12 +192,20 @@ if($gather_subset.Contains('date_time')) {
 
 if($gather_subset.Contains('distribution')) {
     $win32_os = Get-LazyCimInstance Win32_OperatingSystem
+    $product_type = switch($win32_os.ProductType) {
+        1 { "workstation" }
+        2 { "domain_controller" }
+        3 { "server" }
+        default { "unknown" }
+    }
+
     $ansible_facts += @{
         ansible_distribution = $win32_os.Caption
         ansible_distribution_version = $osversion.Version.ToString()
         ansible_distribution_major_version = $osversion.Version.Major.ToString()
         ansible_os_family = "Windows"
         ansible_os_name = ($win32_os.Name.Split('|')[0]).Trim()
+        ansible_os_product_type = $product_type
     }
 }
 
@@ -301,6 +309,13 @@ if($gather_subset.Contains('platform')) {
     $win32_os = Get-LazyCimInstance Win32_OperatingSystem
     $ip_props = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
 
+    try {
+        $ansible_reboot_pending = Get-PendingRebootStatus
+    } catch {
+        # fails for non-admin users, set to null in this case
+        $ansible_reboot_pending = $null
+    }
+
     $ansible_facts += @{
         ansible_architecture = $win32_os.OSArchitecture
         ansible_domain = $ip_props.DomainName
@@ -312,7 +327,7 @@ if($gather_subset.Contains('platform')) {
         ansible_owner_contact = ([string] $win32_cs.PrimaryOwnerContact)
         ansible_owner_name = ([string] $win32_cs.PrimaryOwnerName)
         # FUTURE: should this live in its own subset?
-        ansible_reboot_pending = (Get-PendingRebootStatus)
+        ansible_reboot_pending = $ansible_reboot_pending
         ansible_system = $osversion.Platform.ToString()
         ansible_system_description = ([string] $win32_os.Description)
         ansible_system_vendor = $win32_cs.Manufacturer
@@ -389,7 +404,8 @@ if($gather_subset.Contains('windows_domain')) {
 
 if($gather_subset.Contains('winrm')) {
 
-    $winrm_https_listener_parent_paths = Get-ChildItem -Path WSMan:\localhost\Listener -Recurse | Where-Object {$_.PSChildName -eq "Transport" -and $_.Value -eq "HTTPS"} | select PSParentPath
+    $winrm_https_listener_parent_paths = Get-ChildItem -Path WSMan:\localhost\Listener -Recurse -ErrorAction SilentlyContinue | `
+        Where-Object {$_.PSChildName -eq "Transport" -and $_.Value -eq "HTTPS"} | select PSParentPath
     if ($winrm_https_listener_parent_paths -isnot [array]) {
        $winrm_https_listener_parent_paths = @($winrm_https_listener_parent_paths)
     }
