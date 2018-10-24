@@ -242,7 +242,7 @@ options:
   memory_swappiness:
     description:
         - Tune a container's memory swappiness behavior. Accepts an integer between 0 and 100.
-    default: 0
+        - If not set, the value will be remain the same if container exists and will be inherited from the host machine if it is (re-)created.
   name:
     description:
       - Assign a name to a new container or match an existing container.
@@ -359,6 +359,10 @@ options:
     description:
        - Use with restart policy to control maximum number of restart attempts.
     default: 0
+  runtime:
+    description:
+      - Runtime to use for the container.
+    version_added: "2.8"
   shm_size:
     description:
       - "Size of C(/dev/shm) (format: C(<number>[<unit>])). Number is positive integer.
@@ -855,6 +859,7 @@ class TaskParameters(DockerBaseClass):
         self.restart = None
         self.restart_retries = None
         self.restart_policy = None
+        self.runtime = None
         self.shm_size = None
         self.security_opts = None
         self.state = None
@@ -1117,6 +1122,9 @@ class TaskParameters(DockerBaseClass):
 
         if self.client.HAS_UTS_MODE_OPT:
             host_config_params['uts_mode'] = 'uts'
+
+        if self.client.HAS_RUNTIME_OPT:
+            host_config_params['runtime'] = 'runtime'
 
         params = dict()
         for key, value in host_config_params.items():
@@ -1561,6 +1569,7 @@ class Container(DockerBaseClass):
             expected_ports=host_config.get('PortBindings'),
             read_only=host_config.get('ReadonlyRootfs'),
             restart_policy=restart_policy.get('Name'),
+            runtime=host_config.get('Runtime'),
             # Cannot test shm_size, as shm_size is not included in container inspection results.
             # shm_size=host_config.get('ShmSize'),
             security_opts=host_config.get("SecurityOpt"),
@@ -2145,12 +2154,10 @@ class ContainerManager(DockerBaseClass):
                         self.fail("Error disconnecting container from network %s - %s" % (diff['parameter']['name'],
                                                                                           str(exc)))
             # connect to the network
-            params = dict(
-                ipv4_address=diff['parameter'].get('ipv4_address', None),
-                ipv6_address=diff['parameter'].get('ipv6_address', None),
-                links=diff['parameter'].get('links', None),
-                aliases=diff['parameter'].get('aliases', None)
-            )
+            params = dict()
+            for para in ('ipv4_address', 'ipv6_address', 'links', 'aliases'):
+                if diff['parameter'].get(para):
+                    params[para] = diff['parameter'][para]
             self.results['actions'].append(dict(added_to_network=diff['parameter']['name'], network_parameters=params))
             if not self.check_mode:
                 try:
@@ -2202,20 +2209,25 @@ class ContainerManager(DockerBaseClass):
                     status = self.client.wait(container_id)['StatusCode']
                 else:
                     status = self.client.wait(container_id)
-                config = self.client.inspect_container(container_id)
-                logging_driver = config['HostConfig']['LogConfig']['Type']
-
-                if logging_driver == 'json-file' or logging_driver == 'journald':
-                    output = self.client.logs(container_id, stdout=True, stderr=True, stream=False, timestamps=False)
+                if self.parameters.auto_remove:
+                    output = "Cannot retrieve result as auto_remove is enabled"
                     if self.parameters.output_logs:
-                        self._output_logs(msg=output)
+                        self.client.module.warn('Cannot output_logs if auto_remove is enabled!')
                 else:
-                    output = "Result logged using `%s` driver" % logging_driver
+                    config = self.client.inspect_container(container_id)
+                    logging_driver = config['HostConfig']['LogConfig']['Type']
+
+                    if logging_driver == 'json-file' or logging_driver == 'journald':
+                        output = self.client.logs(container_id, stdout=True, stderr=True, stream=False, timestamps=False)
+                        if self.parameters.output_logs:
+                            self._output_logs(msg=output)
+                    else:
+                        output = "Result logged using `%s` driver" % logging_driver
 
                 if status != 0:
                     self.fail(output, status=status)
                 if self.parameters.cleanup:
-                    self.container_remove(container_id, force=True)
+                    self.container_remove(container_id, force=True, ignore_failure=self.parameters.auto_remove)
                 insp = self._get_container(container_id)
                 if insp.raw:
                     insp.raw['Output'] = output
@@ -2224,7 +2236,7 @@ class ContainerManager(DockerBaseClass):
                 return insp
         return self._get_container(container_id)
 
-    def container_remove(self, container_id, link=False, force=False):
+    def container_remove(self, container_id, link=False, force=False, ignore_failure=False):
         volume_state = (not self.parameters.keep_volumes)
         self.log("remove container container:%s v:%s link:%s force%s" % (container_id, volume_state, link, force))
         self.results['actions'].append(dict(removed=container_id, volume_state=volume_state, link=link, force=force))
@@ -2234,7 +2246,8 @@ class ContainerManager(DockerBaseClass):
             try:
                 response = self.client.remove_container(container_id, v=volume_state, link=link, force=force)
             except Exception as exc:
-                self.fail("Error removing container %s: %s" % (container_id, str(exc)))
+                if not ignore_failure:
+                    self.fail("Error removing container %s: %s" % (container_id, str(exc)))
         return response
 
     def container_update(self, container_id, update_parameters):
@@ -2421,6 +2434,20 @@ class AnsibleDockerClientContainer(AnsibleDockerClient):
                 self.module.warn("docker API version is %s. Minimum version required is 1.25 to set or "
                                  "update the container's stop_timeout configuration." % (docker_api_version,))
 
+        ipvX_address_supported = LooseVersion(docker_version) >= LooseVersion('1.9')
+        if not ipvX_address_supported:
+            ipvX_address_used = False
+            for network in self.module.params.get("networks", []):
+                if 'ipv4_address' in network or 'ipv6_address' in network:
+                    ipvX_address_used = True
+            if ipvX_address_used:
+                self.fail("docker or docker-py version is %s. Minimum version required is 1.9 to use "
+                          "ipv4_address or ipv6_address in networks." % (docker_version,))
+
+        runtime_supported = LooseVersion(docker_api_version) >= LooseVersion('1.12')
+        if self.module.params.get("runtime") and not runtime_supported:
+            self.fail('docker API version is %s. Minimum version required is 1.12 to set runtime option.' % (docker_api_version,))
+
         self.HAS_INIT_OPT = init_supported
         self.HAS_UTS_MODE_OPT = uts_mode_supported
         self.HAS_BLKIO_WEIGHT_OPT = blkio_weight_supported
@@ -2428,6 +2455,8 @@ class AnsibleDockerClientContainer(AnsibleDockerClient):
         self.HAS_STOP_TIMEOUT_OPT = stop_timeout_supported
 
         self.HAS_AUTO_REMOVE_OPT = HAS_DOCKER_PY_2 or HAS_DOCKER_PY_3
+        self.HAS_RUNTIME_OPT = runtime_supported
+
         if self.module.params.get('auto_remove') and not self.HAS_AUTO_REMOVE_OPT:
             self.fail("'auto_remove' is not compatible with the 'docker-py' Python package. It requires the newer 'docker' Python package.")
 
@@ -2496,6 +2525,7 @@ def main():
         restart=dict(type='bool', default=False),
         restart_policy=dict(type='str', choices=['no', 'on-failure', 'always', 'unless-stopped']),
         restart_retries=dict(type='int', default=None),
+        runtime=dict(type='str', default=None),
         security_opts=dict(type='list'),
         shm_size=dict(type='str'),
         state=dict(type='str', choices=['absent', 'present', 'started', 'stopped'], default='started'),
@@ -2522,7 +2552,8 @@ def main():
     client = AnsibleDockerClientContainer(
         argument_spec=argument_spec,
         required_if=required_if,
-        supports_check_mode=True
+        supports_check_mode=True,
+        min_docker_api_version='1.20',
     )
 
     cm = ContainerManager(client)

@@ -39,7 +39,7 @@ options:
         See the C(allow_downgrade) documentation for caveats with downgrading packages.
       - When using state=latest, this can be C('*') which means run C(yum -y update).
       - You can also pass a url or a local path to a rpm file (using state=present).
-        To operate on several packages this can accept a comma separated list of packages or (as of 2.0) a list of packages.
+        To operate on several packages this can accept a comma separated string of packages or (as of 2.0) a list of packages.
     aliases: [ pkg ]
   exclude:
     description:
@@ -175,7 +175,6 @@ options:
       - If set to C(all), disables all excludes.
       - If set to C(main), disable excludes defined in [main] in yum.conf.
       - If set to C(repoid), disable excludes defined for given repo id.
-    choices: [ all, main, repoid ]
     version_added: "2.7"
   download_only:
     description:
@@ -183,20 +182,11 @@ options:
     default: "no"
     type: bool
     version_added: "2.7"
-  lock_poll:
-    description:
-      - Poll interval to wait for the yum lockfile to be freed.
-      - "By default this is set to -1, if you set it to a positive integer it will enable to polling"
-    required: false
-    default: -1
-    type: int
-    version_added: "2.8"
   lock_timeout:
     description:
-      - Amount of time to wait for the yum lockfile to be freed
-      - This should be set along with C(lock_poll) to enable the lockfile polling.
+      - Amount of time to wait for the yum lockfile to be freed.
     required: false
-    default: 10
+    default: 0
     type: int
     version_added: "2.8"
 notes:
@@ -701,20 +691,27 @@ class YumModule(YumDnf):
         # setting system proxy environment and saving old, if exists
         my = self.yum_base()
         namepass = ""
+        proxy_url = ""
         scheme = ["http", "https"]
         old_proxy_env = [os.getenv("http_proxy"), os.getenv("https_proxy")]
         try:
             if my.conf.proxy:
                 if my.conf.proxy_username:
                     namepass = namepass + my.conf.proxy_username
+                    proxy_url = my.conf.proxy
                     if my.conf.proxy_password:
                         namepass = namepass + ":" + my.conf.proxy_password
-                namepass = namepass + '@'
-                for item in scheme:
-                    os.environ[item + "_proxy"] = re.sub(
-                        r"(http://)",
-                        r"\1" + namepass, my.conf.proxy
-                    )
+                elif '@' in my.conf.proxy:
+                    namepass = my.conf.proxy.split('@')[0].split('//')[-1]
+                    proxy_url = my.conf.proxy.replace("{0}@".format(namepass), "")
+
+                if namepass:
+                    namepass = namepass + '@'
+                    for item in scheme:
+                        os.environ[item + "_proxy"] = re.sub(
+                            r"(http://)",
+                            r"\1" + namepass, proxy_url
+                        )
             yield
         except yum.Errors.YumBaseError:
             raise
@@ -1306,8 +1303,8 @@ class YumModule(YumDnf):
         if self.conf_file and os.path.exists(self.conf_file):
             self.yum_basecmd += ['-c', self.conf_file]
 
-        if repoq:
-            repoq += ['-c', self.conf_file]
+            if repoq:
+                repoq += ['-c', self.conf_file]
 
         if self.skip_broken:
             self.yum_basecmd.extend(['--skip-broken'])
