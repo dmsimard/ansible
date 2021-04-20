@@ -43,6 +43,11 @@ options:
         description:
             - The name of the job template this schedule applies to.
         required: false
+        choices: ["run", "check"]
+    job_type:
+        description:
+            - The type of the job template this schedule applies to.
+        required: false
     project:
         description:
             - The name of the project this schedule applies to.
@@ -70,6 +75,14 @@ options:
         choices: ["runonce", "minute", "hour", "day"]
         required: false
         default: runonce
+    extra_data:
+        description:
+            - Extra variables passed to the schedule.
+        required: false
+        type: dict
+    limit:
+        description:
+            - A host pattern to further constrain the list of hosts managed or affected by the schedule
 extends_documentation_fragment: tower
 '''
 
@@ -80,14 +93,12 @@ EXAMPLES = '''
     project: git project
     frequency: 30
     frequency_unit: minute
-
 - name: Disable the schedule for an inventory source
   tower_schedule:
     state: disabled
     inventory_source: cloud
     frequency: 30
     frequency_unit: minute
-
 - name: Create a schedule to run a job template once at a specific time
   tower_schedule:
     state: present
@@ -98,17 +109,16 @@ EXAMPLES = '''
 
 from datetime import datetime
 
+from ansible.module_utils.ansible_tower import TowerModule, tower_auth_config, tower_check_mode
+
 try:
-    import json
+    import yaml
     import tower_cli
-    import tower_cli.utils.exceptions as exc
+    import tower_cli.exceptions as exc
 
     from tower_cli.conf import settings
-    from ansible.module_utils.ansible_tower import tower_auth_config, tower_check_mode
-
-    HAS_TOWER_CLI = True
-except:
-    HAS_TOWER_CLI = False
+except ImportError:
+    pass
 
 def parse_datetime_string(module, dt_string):
     """
@@ -143,84 +153,81 @@ def build_rrule(startdate, freq, freq_unit):
 
     return result
 
-def get_resource_id(kind, name):
-    """
-    Attempts to find a <kind> resource named <name> and return it's id.
-    """
-    try:
-        resource = tower_cli.get_resource(kind)
-        item = resource.get(name=name)
-        return item['id']
-    except (exc.NotFound) as excinfo:
-        module.fail_json(
-            msg="Could not update schedule, {0} not found: {1}".format(kind, name),
-            changed=False
-        )
+def update_fields(p):
+    '''This updates the module field names
+    to match the field names tower-cli expects to make
+    calling of the modify/delete methods easier.
+    '''
+    params = p.copy()
+    field_map = {
+    }
+
+    params_update = {}
+    for old_k, new_k in field_map.items():
+        v = params.pop(old_k)
+        params_update[new_k] = v
+
+    extra_data = params.get('extra_data')
+    if extra_data is not None:
+        params_update['extra_data'] = yaml.dump(extra_data)
+
+    params.update(params_update)
+    return params
+
+def update_resources(module, p):
+    params = p.copy()
+
+    identity_map = {
+        'job_template': 'name',
+        'project': 'name',
+        'inventory_source': 'name',
+    }
+    for k, v in identity_map.items():
+        try:
+            if params[k]:
+                result = tower_cli.get_resource(k).get(**{v: params[k]})
+                params[k] = result['id']
+            elif k in params:
+                # unset empty parameters to avoid ValueError: invalid literal for int() with base 10: ''
+                del(params[k])
+        except (exc.NotFound) as excinfo:
+            module.fail_json(msg='Failed to update schedule: {0}'.format(excinfo), changed=False)
+    return params
 
 def main():
-    module = AnsibleModule(
-        argument_spec=dict(
-            name=dict(required=True),
-            state=dict(choices=['present', 'absent', 'disabled'], default='present'),
-            description=dict(default=''),
-            job_template=dict(),
-            project=dict(),
-            inventory_source=dict(),
-            start=dict(default=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")),
-            frequency=dict(type='int'),
-            frequency_unit=dict(choices=['runonce', 'minute', 'hour', 'day'], default='runonce'),
-            tower_host=dict(),
-            tower_username=dict(),
-            tower_password=dict(no_log=True),
-            tower_verify_ssl=dict(type='bool', default=True),
-            tower_config_file=dict(type='path')
-        ),
-        mutually_exclusive=['job_template', 'project', 'inventory_source'],
-        supports_check_mode=True
+    argument_spec=dict(
+        name=dict(required=True),
+        state=dict(choices=['present', 'absent', 'disabled'], default='present'),
+        description=dict(default=''),
+        job_template=dict(),
+        job_type=dict(choices=['run', 'check']),
+        project=dict(),
+        inventory_source=dict(),
+        start=dict(default=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")),
+        frequency=dict(type='int'),
+        frequency_unit=dict(choices=['runonce', 'minute', 'hour', 'day'], default='runonce'),
+        extra_data=dict(type='dict', required=False),
+        limit=dict(default=''),
     )
-
-    if not HAS_TOWER_CLI:
-        module.fail_json(msg='ansible-tower-cli required for this module')
+    mutually_exclusive = ['job_template', 'project', 'inventory_source']
+    module = TowerModule(argument_spec=argument_spec, mutually_exclusive=mutually_exclusive, supports_check_mode=True)
 
     name = module.params.get('name')
-    state = module.params.get('state')
-    description = module.params.get('description')
-    job_template = module.params.get('job_template')
-    project = module.params.get('project')
-    inventory_source = module.params.get('inventory_source')
-    start = module.params.get('start')
-    frequency = module.params.get('frequency')
-    frequency_unit = module.params.get('frequency_unit')
-
-    json_output = {
-        'name': name,
-        'description': description,
-        'state': state,
-        'start': start,
-        'frequency_unit': frequency_unit
-    }
-    if frequency:
-        json_output['frequency'] = frequency
+    state = module.params.pop('state')
+    frequency = module.params.pop('frequency')
+    frequency_unit = module.params.pop('frequency_unit')
+    start =  module.params.pop('start')
+    json_output = {'schedule': name, 'state': state}
 
     tower_auth = tower_auth_config(module)
     with settings.runtime_values(**tower_auth):
         tower_check_mode(module)
         schedule = tower_cli.get_resource('schedule')
 
-        params = {
-            'name': name,
-            'description': description,
-        }
-
-        if job_template:
-            params['job_template'] = get_resource_id('job_template', job_template)
-            json_output['job_template'] = job_template
-        if project:
-            params['project'] = get_resource_id('project', project)
-            json_output['project'] = project
-        if inventory_source:
-            params['inventory_source'] = get_resource_id('inventory_source', inventory_source)
-            json_output['inventory_source'] = inventory_source
+        params = update_resources(module, module.params)
+        params = update_fields(params)
+        params['create_on_missing'] = True
+        params['enabled'] = not state == 'disabled'
 
         dtstart = parse_datetime_string(module, start)
         params['rrule'] = build_rrule(dtstart, frequency, frequency_unit)
@@ -229,12 +236,8 @@ def main():
             if state == 'absent':
                 result = schedule.delete(**params)
             else:
-                params['enabled'] = False if state == 'disabled' else True
-                json_output['enabled'] = params['enabled']
-                # TODO: Figure out why modify with create_on_missing fails with MethodNotAllowed
-                # https://github.com/ansible/tower-cli/issues/578
-                result = schedule.create(**params)
                 result = schedule.modify(**params)
+                json_output['id'] = result['id']
         except (exc.ConnectionError, exc.BadRequest, exc.NotFound) as excinfo:
             module.fail_json(msg='Failed to update schedule: {0}'.format(excinfo), changed=False)
 
